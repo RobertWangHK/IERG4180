@@ -1,0 +1,11 @@
+﻿  util.cpp
+  main.cpp
+d:\ierg4180\project2\netconsoleclient_windows\netprobeclient\getopt.h(59): warning C4081: 应输入“newline”；找到“;”
+d:\ierg4180\project2\netconsoleclient_windows\netprobeclient\main.cpp(166): warning C4244: “初始化”: 从“LONGLONG”转换到“long”，可能丢失数据
+d:\ierg4180\project2\netconsoleclient_windows\netprobeclient\main.cpp(187): warning C4474: snprintf: 格式字符串中传递的参数太多
+  d:\ierg4180\project2\netconsoleclient_windows\netprobeclient\main.cpp(187): note: 占位符和其参数预计 0 可变参数，但提供的却是 1 参数
+d:\ierg4180\project2\netconsoleclient_windows\netprobeclient\main.cpp(218): warning C4474: snprintf: 格式字符串中传递的参数太多
+  d:\ierg4180\project2\netconsoleclient_windows\netprobeclient\main.cpp(218): note: 占位符和其参数预计 0 可变参数，但提供的却是 1 参数
+  正在生成代码...
+  NetProbeClient.vcxproj -> D:\IERG4180\project2\NetConsoleClient_Windows\Debug\NetProbeClient.exe
+  NetProbeClient.vcxproj -> D:\IERG4180\project2\NetConsoleClient_Windows\Debug\NetProbeClient.pdb (Full PDB)
