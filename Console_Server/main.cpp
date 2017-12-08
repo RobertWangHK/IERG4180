@@ -33,8 +33,6 @@
 #include <string>
 #include "util.h"
 #include "Thread.h"
-#include <sys/stat.h> 
-#include <map>
 
 #define DEFAULT_UPDATE_TIME 500
 #define DEFAULT_HTTP_PORT_NUM "4180"
@@ -59,31 +57,33 @@ string httpsPort = DEFAULT_HTTPS_PORT_NUM;
 string mode = DEFAULT_MODE;
 int numThread = DEFAULT_NUMBER_THREADS;
 
+void display();
+void http_https_initiate();
+void http_increase();
+void http_decrease();
+void https_increase();
+void https_decrease();
+
 int listen_http();
-int listen_http_client();
+int listen_https();
 int handle_http(SOCKET conn_socket);
-int handle_http_client(SOCKET conn_socket);
+int handle_https(SOCKET conn_socket, SSL* ssl);
 
-void handle_client1(SOCKET conn_socket, int num);
-void handle_client2(SOCKET conn_socket, int num);
+int create_socket(int port);
+void init_openssl();
+void cleanup_openssl();
+SSL_CTX* create_context();
+void configure_context(SSL_CTX *ctx);
 
-struct Client_Info{
-	int num_files;
-	time_t lastModified[10];
-	string fileName[10];
+struct thread_data {
+	int http; //number of tcp client
+	int https; //number of udp client
 };
 
-struct Clients{
-	struct Client_Info client1;
-	struct Client_Info client2;
-};
-
-struct Clients clients;
-std::map<string, int> errors;
+struct thread_data context;
 
 int main(int argc, char *argv[])
 {
-
 	static struct option long_options[] =
 	{
 		{ "stat", required_argument, 0, 1 },
@@ -121,17 +121,27 @@ int main(int argc, char *argv[])
 			break;
 		}
 	}
+
+	http_https_initiate();
+
+	//start the display thread
+	if (updateTime != 0){
+		std::thread display_thread(display);
+		display_thread.detach();
+	}
+
 	//start two handling threads
-	printf("web browser on port 4180\n");
-	printf("clients connect to 4181\n");
 	std::thread http_thread(listen_http);
-	std::thread http_thread_client(listen_http_client);
+	std::thread https_thread(listen_https);
 	http_thread.join();
-	http_thread_client.join();
+	https_thread.join();
 	return 0;	
 }
-int listen_http(){
 
+int listen_http(){
+	//char * buffer_init = (char *)calloc(sizeof(char), 1000);
+	
+	//create the http socket pool
     ThreadPool pool(numThread);
 
 	sockaddr_in *TCP_Addr = new sockaddr_in;
@@ -144,140 +154,119 @@ int listen_http(){
 	bind(Http, (struct sockaddr *)TCP_Addr, sizeof(struct sockaddr_in));
 	listen(Http, 5);
 
-	while (1) {
-		sockaddr_in* peer_addr = new sockaddr_in;
-		memset(peer_addr, 0, sizeof(struct sockaddr_in));
-		socklen_t addr_len = sizeof(struct sockaddr_in);
-		SOCKET conn_socket = conn_socket = accept(Http, (struct sockaddr *)peer_addr, &addr_len);
-		
-		//push to pipeline
-		auto result = pool.enqueue(handle_http, conn_socket);
-		delete peer_addr;
+	if (mode.compare("thread") == 0){
+		while (1) {
+			sockaddr_in* peer_addr = new sockaddr_in;
+			memset(peer_addr, 0, sizeof(struct sockaddr_in));
+			socklen_t addr_len = sizeof(struct sockaddr_in);
+			SOCKET conn_socket = conn_socket = accept(Http, (struct sockaddr *)peer_addr, &addr_len);
+
+			std::thread thread_new_client(handle_http, conn_socket);
+			thread_new_client.detach();
+			delete peer_addr;
+		}
 	}
+	else{ //threadpool mode http
+		while (1) {
+			sockaddr_in* peer_addr = new sockaddr_in;
+			memset(peer_addr, 0, sizeof(struct sockaddr_in));
+			socklen_t addr_len = sizeof(struct sockaddr_in);
+			SOCKET conn_socket = conn_socket = accept(Http, (struct sockaddr *)peer_addr, &addr_len);
 
-	delete TCP_Addr;
-	TCP_Addr = 0;
-	closesocket(Http);
-	return 0;
-}
-int listen_http_client(){
+			//push to pipeline
+			auto result = pool.enqueue(handle_http, conn_socket);
+			delete peer_addr;
+		}
 
-    ThreadPool pool(numThread);
-
-	sockaddr_in *TCP_Addr = new sockaddr_in;
-	memset(TCP_Addr, 0, sizeof(struct sockaddr_in));
-	TCP_Addr->sin_family = AF_INET;
-	TCP_Addr->sin_port = htons(stoi(httpsPort));
-	inet_pton(AF_INET, lHost.c_str(), &(TCP_Addr->sin_addr.s_addr));
-
-	SOCKET Http = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	bind(Http, (struct sockaddr *)TCP_Addr, sizeof(struct sockaddr_in));
-	listen(Http, 5);
-
-	while (1) {
-		sockaddr_in* peer_addr = new sockaddr_in;
-		memset(peer_addr, 0, sizeof(struct sockaddr_in));
-		socklen_t addr_len = sizeof(struct sockaddr_in);
-		SOCKET conn_socket = conn_socket = accept(Http, (struct sockaddr *)peer_addr, &addr_len);
-
-		//push to pipeline
-		auto result = pool.enqueue(handle_http_client, conn_socket);
-		delete peer_addr;
 	}
-
 	delete TCP_Addr;
 	TCP_Addr = 0;
 	closesocket(Http);
 	return 0;
 }
 
-// this handle_http is for handling web browser request specifically.
+int listen_https(){
+	//char * buffer_init = (char *)calloc(sizeof(char), 1000);
+	//bind https socket
+
+	init_openssl();
+    SSL_CTX *ctx = create_context();
+    configure_context(ctx);
+    SSL* ssl = SSL_new(ctx);
+
+	ThreadPool pool(numThread);
+	int Https = create_socket(stoi(httpsPort));
+	printf("Opened the port %s, and begin to listen...\n", httpsPort.c_str());
+
+	if (mode.compare("thread") == 0){
+
+		while (1) {
+			sockaddr_in* peer_addr = new sockaddr_in;
+			memset(peer_addr, 0, sizeof(struct sockaddr_in));
+			socklen_t addr_len = sizeof(struct sockaddr_in);
+			SOCKET conn_socket = conn_socket = accept(Https, (struct sockaddr *)peer_addr, &addr_len);
+
+			SSL_set_fd(ssl, conn_socket);
+			if (SSL_accept(ssl) <= 0) 
+    		{
+        		ERR_print_errors_fp(stderr);
+        		exit(EXIT_FAILURE);
+    		}
+    		printf("Finished SSL handshake\n");
+
+			std::thread thread_new_client(handle_https, conn_socket, ssl);
+			thread_new_client.detach();
+			delete peer_addr;
+		}
+
+	}
+	else{ //threadpool mode https
+		while (1) {
+			sockaddr_in* peer_addr = new sockaddr_in;
+			memset(peer_addr, 0, sizeof(struct sockaddr_in));
+			socklen_t addr_len = sizeof(struct sockaddr_in);
+			SOCKET conn_socket = conn_socket = accept(Https, (struct sockaddr *)peer_addr, &addr_len);
+
+			SSL_set_fd(ssl, conn_socket);
+			if (SSL_accept(ssl) <= 0) 
+    		{
+        		ERR_print_errors_fp(stderr);
+        		exit(EXIT_FAILURE);
+    		}
+    		printf("Finished SSL handshake\n");
+
+			//push to pipeline
+			auto result = pool.enqueue(handle_https, conn_socket, ssl);
+			delete peer_addr;
+		}
+
+	}
+
+	closesocket(Https);
+	return 0;
+}
+
 int handle_http(SOCKET conn_socket){
-
-	struct sockaddr_in addr;
-    socklen_t addr_size = sizeof(struct sockaddr_in);
-    int res = getpeername(conn_socket, (struct sockaddr *)&addr, &addr_size);
-    char *clientip = new char[20];
-    strcpy(clientip, inet_ntoa(addr.sin_addr));
-    string peer_ipaddress = string(clientip);
-    if (errors.find(peer_ipaddress) != errors.end() ) {
-  		if(errors[peer_ipaddress] >= 2){
-			sleep(300);
-			errors[peer_ipaddress] = 0;
-		}	
-	}
+	
+	http_increase();
 
 	char head_buffer[1000];
 	memset(head_buffer, 0, 1000);
-	int num_error_login = 0;
 
-	//retrieve the url from request
+	//string file_path = "index.html";
+
 	recv_line(conn_socket, head_buffer, 1000, MSG_WAITALL);
 	string header(reinterpret_cast<const char *>(head_buffer), sizeof(head_buffer) / sizeof(head_buffer[0]));
 	std::size_t position = header.find("HTTP");
 	string file_path = header.substr(5, position - 5);
 	file_path.erase(file_path.find_last_not_of(" \n\r\t")+1);
-	if (file_path.size() == 0 || file_path.compare("login.html") == 0){
-		file_path = "html/login.html";
-	}
-	//check if login or user validation error
-	if(file_path.find("login-check") != string::npos){
-		unsigned position_uname = file_path.find("uname");
-		unsigned position_pwd = file_path.find("pwd");
 
-		if (!(position_uname == string::npos) && !(position_pwd == string::npos)){
-			string username = file_path.substr(position_uname + 6, position_pwd - position_uname - 7);
-			string password = file_path.substr(position_pwd + 4);
-			if (!(username.compare("abc")==0) || !(password.compare("abc")==0)){
-				file_path = "html/incorrect.html";
-				struct sockaddr_in addr;
-    			socklen_t addr_size = sizeof(struct sockaddr_in);
-    			int res = getpeername(conn_socket, (struct sockaddr *)&addr, &addr_size);
-    			char *clientip = new char[20];
-    			strcpy(clientip, inet_ntoa(addr.sin_addr));
-    			string peer_ipaddress = string(clientip);
-    			//cout << peer_ipaddress << endl;
-				if ( errors.find(peer_ipaddress) == errors.end() ) {
-  					errors[peer_ipaddress] = 1;
-				} else {
-  					errors[peer_ipaddress] += 1;
-				}
-				if(errors[peer_ipaddress] >= 2){
-					cout << "twice" << endl;
-					file_path = "html/block.html";
-					//sleep(300);
-				}
-
-			}
-			else{ // success login -> home page
-				file_path = "html/home.html";
-			}
-		}
+	if (file_path.size() == 0){
+		file_path = "index.html";
 	}
 
-	//perform submit command to synchronize
-	if(file_path.find("submit") != string::npos){
-		unsigned  position_folder1 = file_path.find("Folder1");
-		unsigned  position_folder2 = file_path.find("Folder2");
-		// get two folder name from url request
-		if (!(position_folder1 == string::npos) && !(position_folder2 == string::npos)){
-		 	string name_folder1 = file_path.substr(position_folder1 + 8, position_folder2 - position_folder1 - 9);
-			string name_folder2 = file_path.substr(position_folder2 + 8);
-		}
-		file_path = "html/hoem.html";
-	}
+	//cout << "path: " << file_path << endl;
 
-	//if ask for client.html
-	if(file_path.find("client1") != string::npos){
-		file_path = "html/client1.html";
-	}
-	if(file_path.find("client2") != string::npos){
-		file_path = "html/client2.html";
-	}
-
-	//below portion is for both retrieving html and files specifically. 
-	//1. how to replace the file link in home.html
-	//2. how to synchronize the two clients
 	string file_header;
 	string file_string;
 
@@ -285,182 +274,209 @@ int handle_http(SOCKET conn_socket){
 	infile.open(file_path.c_str());
 	if (!infile.fail()){
 		infile.open(file_path.c_str());
-		file_header = "HTTP/1.0 200 OK\r\nContent-type:text/html;charset=utf8\r\n\r\n";
+		file_header = "Status: 200 OK\r\n\r\n";
 		std::stringstream buffer;
    		buffer << infile.rdbuf();
    		file_string = buffer.str();
    		file_string = file_header.append(file_string);
 	}
 	else{
-		file_path = "html/404error.html";
-		infile.open(file_path.c_str());
-		file_header = "HTTP/1.0 200 OK\r\nContent-type:text/html;charset=utf8\r\n\r\n";
-		std::stringstream buffer;
-   		buffer << infile.rdbuf();
-   		file_string = buffer.str();
-   		file_string = file_header.append(file_string);
-	}
-	//replace the clients file list segment with stored information, need also attach the download link (optional)
-	if (file_path.find("client1") != string::npos){
-		int num = clients.client1.num_files;
-		int i =0;
-		string client1_html = "";
-		for (;i<num; i++){
-			string temp_file_name = clients.client1.fileName[i];
-			client1_html += "<LI>  <A HREF=\"client1\\" +  temp_file_name + "\">temp_file_name</A>";
-		}
-		file_string.replace(file_string.find("@"), 1, client1_html);
-	}
-
-	if (file_path.find("client2") != string::npos){
-		int num = clients.client2.num_files;
-		int i =0;
-		string client2_html = "";
-		for (;i<num; i++){
-			string temp_file_name = clients.client2.fileName[i];
-			client2_html += "<LI>  <A HREF=\"client2\\" +  temp_file_name + "\">temp_file_name</A>";
-		}
-		file_string.replace(file_string.find("@"), 1, client2_html);
+		file_header = "Status: 404 Not Found\r\n\r\n";
+		file_string = file_header;
 	}
 
    	char * content_buffer = new char[file_string.size() + 1];
 	std::copy(file_string.begin(), file_string.end(), content_buffer);
 	content_buffer[file_string.size()] = '\0';
 
+	//cout << "content buffer: " << content_buffer << endl;
+
 	send_full(conn_socket, content_buffer, file_string.size() + 1,  0);
 
-	close(conn_socket);
-	return 0;
-}
-
-// this handle_http_client is for receiving data information from the client
-int handle_http_client(SOCKET conn_socket){
-
-	//for loop to receive and create folder hirarcy information accordingly, file name, last modified date
-	char buffer[256];
-	string folderName;
-	string fileName;
-	time_t lastModified;
-	int i=0;
-	string client_identity;
-	//receive client folder name and create accordingly
-	memset(buffer, 0, 256);
-	recv_line(conn_socket, buffer, 256, MSG_WAITALL);
-	folderName = string(buffer);
-	mkdir(folderName.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
-	if(folderName.compare("client1")==0){//it is from client1
-		client_identity = "client1";
-	}
-	else if(folderName.compare("client2")==0){//it is from client1
-		client_identity = "client2";
-	}
-	//receive first file name
-	memset(buffer, 0, 256);
-	recv_line(conn_socket, buffer, 256, MSG_WAITALL);
-	fileName = string(buffer);
-	while(fileName.compare("end")!=0){
-		//recv last modified data
-		memset(buffer, 0, 256);
-		recv_line(conn_socket, buffer, 256, MSG_WAITALL);
-		memcpy(&lastModified, buffer, sizeof(time_t));
-
-		//save the file name and last modified information
-		if(folderName.compare("client1")==0){//it is from client1
-			clients.client1.fileName[i] = fileName;
-			clients.client1.lastModified[i] = lastModified;
-		}
-		else if(folderName.compare("client2")==0){//it is from client1
-			clients.client2.fileName[i] = fileName;
-			clients.client2.lastModified[i] = lastModified;
-		}
-		//receive the next one
-		memset(buffer, 0, 256);
-		recv_line(conn_socket, buffer, 256, MSG_WAITALL);
-		fileName = string(buffer);
-		i++;
-	}
-
-	//for loop to receive files from client and save files accordingly.
-	if (client_identity.compare("client1") == 0){
-		handle_client1(conn_socket, i);
-		clients.client1.num_files = i;
-	}
-	else if (client_identity.compare("client2") == 0){
-		handle_client2(conn_socket, i);
-		clients.client2.num_files = i;
-	}
-
+	http_decrease();
 	close(conn_socket);
 	return 0;
 
 }
+int handle_https(SOCKET conn_socket, SSL* ssl){
+	https_increase();
+	//handle here
+	char head_buffer[1000];
+	memset(head_buffer, 0, 1000);
 
-//for asking files from clients
-void handle_client1(SOCKET peer_socket_tcp, int num){
-	char buffer[256];
-	memset(buffer, 0, 256);
-	char * content_buffer = (char *)malloc(sizeof(char) * 1000);
-	long int buffer_size = 1000;//for content_buffer length specifically
-	std::ofstream output;
-	snprintf(buffer, 256, "end", 0);
-	send_full(peer_socket_tcp, buffer, 256, 0);
-
-	while(num>=0){
-		string file_path = clients.client1.fileName[num];
-		memset(buffer, 0, 256);
-		memcpy(buffer, file_path.c_str(), sizeof(file_path));
-		send_full(peer_socket_tcp, buffer, 256, 0);
-
-		//for recieving contents of the required file
-		int r = 0;
-		long long bytes_recv = 0;
-		output.open(file_path.c_str());
-		r = recv(peer_socket_tcp, buffer + bytes_recv, 1000, MSG_WAITALL);
-		while (r > 0) {
-			bytes_recv += r;
-			if (bytes_recv > buffer_size / 2) {
-				content_buffer = (char *)realloc(content_buffer, buffer_size * 2);
-				buffer_size *= 2;
-			}
-			r = recv(peer_socket_tcp, buffer + bytes_recv, 1000, MSG_WAITALL);
-		}
-		string content = string(content_buffer);
-		output << content;
-		output.close();
-		num--;
+	int ret = SSL_read(ssl, head_buffer, 1000);
+	if (ret <= 0) 
+	{
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
 	}
+
+	string header(reinterpret_cast<const char *>(head_buffer), sizeof(head_buffer) / sizeof(head_buffer[0]));
+	std::size_t position = header.find("HTTP");
+	string file_path = header.substr(5, position - 5);
+	file_path.erase(file_path.find_last_not_of(" \n\r\t")+1);
+
+	if (file_path.size() == 0){
+		file_path = "index.html";
+	}
+
+	//cout << "path: " << file_path << endl;
+
+	string file_header;
+	string file_string;
+
+	std::ifstream infile;
+	infile.open(file_path.c_str());
+	if (!infile.fail()){
+		infile.open(file_path.c_str());
+		file_header = "Status: 200 OK\r\n\r\n";
+		std::stringstream buffer;
+   		buffer << infile.rdbuf();
+   		file_string = buffer.str();
+   		file_string = file_header.append(file_string);
+	}
+	else{
+		file_header = "Status: 404 Not Found\r\n\r\n";
+		file_string = file_header;
+	}
+
+   	char * content_buffer = new char[file_string.size() + 1];
+	std::copy(file_string.begin(), file_string.end(), content_buffer);
+	content_buffer[file_string.size()] = '\0';
+
+	//cout << "content buffer: " << content_buffer << endl;
+
+	if (SSL_write(ssl, content_buffer, file_string.size() + 1) < 0) 
+	{
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+	}
+
+	https_decrease();
+	close(conn_socket);
 }
-void handle_client2(SOCKET peer_socket_tcp, int num){
-	char buffer[256];
-	memset(buffer, 0, 256);
-	char * content_buffer = (char *)malloc(sizeof(char) * 1000);
-	long int buffer_size = 1000;//for content_buffer length specifically
-	std::ofstream output;
-	snprintf(buffer, 256, "end", 0);
-	send_full(peer_socket_tcp, buffer, 256, 0);
 
-	while(num>=0){
-		string file_path = clients.client2.fileName[num];
-		memset(buffer, 0, 256);
-		memcpy(buffer, file_path.c_str(), sizeof(file_path));
-		send_full(peer_socket_tcp, buffer, 256, 0);
-
-		//for recieving contents of the required file
-		int r = 0;
-		long long bytes_recv = 0;
-		output.open(file_path.c_str());
-		r = recv(peer_socket_tcp, buffer + bytes_recv, 1000, MSG_WAITALL);
-		while (r > 0) {
-			bytes_recv += r;
-			if (bytes_recv > buffer_size / 2) {
-				content_buffer = (char *)realloc(content_buffer, buffer_size * 2);
-				buffer_size *= 2;
-			}
-			r = recv(peer_socket_tcp, buffer + bytes_recv, 1000, MSG_WAITALL);
-		}
-		string content = string(content_buffer);
-		output << content;
-		output.close();
-		num--;
+void display() {
+	Sleep(5*1000);
+	setbuf(stdout, NULL);
+	std::chrono::time_point<std::chrono::system_clock> start, end;
+    start = std::chrono::system_clock::now();
+	int http = 0;
+	int https = 0;
+	while (1) {	
+		end = std::chrono::system_clock::now();
+		//cout << "time" << end - start << endl;
+		int elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(end-start).count() + 5;
+		int elapsed_milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(end-start).count();
+		//cout << elapsed_milliseconds;
+		//cout << elapsed_seconds;
+		mtx_thread.lock();
+		http = context.http;
+		https = context.https;
+		mtx_thread.unlock();
+		printf("\rElapsed [%ds] HTTP Clients [%d] HTTPS Clients [%d]", elapsed_seconds, http, https);
+		Sleep(updateTime);
 	}
+	return;
+}
+
+void http_https_initiate(){
+	mtx_thread.lock();
+	context.http = 0;
+	context.https = 0;
+	mtx_thread.unlock();
+}
+void http_increase(){
+	mtx_thread.lock();
+	context.http += 1;
+	mtx_thread.unlock();
+}
+void http_decrease(){
+	mtx_thread.lock();
+	context.http -= 1;
+	mtx_thread.unlock();
+}
+void https_increase(){
+	mtx_thread.lock();
+	context.https += 1;
+	mtx_thread.unlock();
+}
+void https_decrease(){
+	mtx_thread.lock();
+	context.https -= 1;
+	mtx_thread.unlock();
+}
+
+int create_socket(int port)
+{
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_sock < 0) 
+    {
+        perror("Unable to create socket");
+        exit(EXIT_FAILURE);
+    }
+
+    if (bind(listen_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) 
+    {
+        perror("Unable to bind");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(listen_sock, 1) < 0) 
+    {
+        perror("Unable to listen");
+        exit(EXIT_FAILURE);
+    }
+
+    return listen_sock;
+}
+
+void init_openssl()
+{ 
+    SSL_load_error_strings();	
+    OpenSSL_add_ssl_algorithms();
+}
+
+void cleanup_openssl()
+{
+    EVP_cleanup();
+}
+
+SSL_CTX* create_context()
+{
+    const SSL_METHOD* method = SSLv23_server_method();
+    SSL_CTX* ctx = SSL_CTX_new(method);
+    if (!ctx) 
+    {
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    return ctx;
+}
+
+void configure_context(SSL_CTX *ctx)
+{
+    /// Set the server private key and server cert
+    if (SSL_CTX_use_certificate_file(ctx, "certs/server.cert.signed.pem", SSL_FILETYPE_PEM) < 0)
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    
+    printf("Loaded server certificate: certs/server.cert.signed.pem\n");
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "private/server.key.pem", SSL_FILETYPE_PEM) < 0 ) 
+    {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    
+    printf("Loaded server private key: private/server.key.pem\n");
 }
